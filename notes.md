@@ -1,10 +1,12 @@
-简单介绍下自动微分(Algorithmic Adjoint Differentiation)在衍生品定价里的应用，相较于其他微分方法，AAD的计算复杂度与参数数量无关,能够在常数时间内计算出所有的Greeks，以下大部分内容出自Antoine Savine的**[Modern Computational Finance](https://github.com/asavine/CompFinance)**。
+简单介绍下伴随微分(Algorithmic Adjoint Differentiation)在衍生品定价里的应用，对函数$f(x_1,x_2,\dots,x_n)$而言，相较于其他方法，伴随微分方法进行梯度求解的开销至多是函数计算本身的常数倍，与参数维度n 无关，因而在$n$较大时有明显的优势。
+
+以下大部分内容出自Antoine Savine的**[Modern Computational Finance](https://github.com/asavine/CompFinance)**。
 
 ### 背景
 
 我们的目的是寻找一种能够快速计算Greeks，也即期权价格对各个要素的偏导数的方法。
 
-以看涨期权为例，在无套利和常数波动率条件下，由BS公式，看涨期权的价格表示为
+以看涨期权为例，看涨期权是一种金融合约，它赋予买方在未来某个特定时间，以约定的价格$K$买入某种资产（如股票）的权利。在无套利和常值波动率假设下，由BS公式，看涨期权的价格可以表示为
 
 $$
 C(S_0, r, y, \sigma, K, T) = DF [ F N(d_1) - K N(d_2) ]
@@ -22,53 +24,66 @@ $$
 
 *   折现因子： $DF = \exp(-rT)$
 *   远期价格： $F = S_0 \exp[(r - y)T]$
-*   到期收益的标准差： $std = \sigma \sqrt{T}$ （注：即总波动率）
+*   到期收益的标准差： $std = \sigma \sqrt{T}$
 *   中间变量：
     $$d = \frac{\log(\frac{F}{K})}{std}, \quad d_1 = d + \frac{std}{2}, \quad d_2 = d - \frac{std}{2}$$
 
-*   $N(d_1)$ 代表在现货测度下期权最终为实值的概率；
-*   $N(d_2)$ 代表在风险中性测度下的概率，其中 $N$ 是标准正态分布的累积分布函数。
+*   $N(d_1)$、$N(d_2)$ 分别是在标准正态分布 $\mathcal N(0,1)$ 下点 $d_1$、$d_2$ 处的累积分布函数值；
+*   具体来说，$N$ 定义为
+    $$
+    N(x) = \int_{-\infty}^{x} \frac{1}{\sqrt{2\pi}} \exp\left(-\frac{u^2}{2}\right)\, \mathrm du
+    $$
+    即标准正态分布的累积分布函数。
 
 这个式子可以写成如下的纯函数
 
-```cpp
-double BlackScholes(
-    const double S0,
-    const double r,
-    const double y,
-    const double sigma,
-    const double K,
-    const double T)
-{
-    // 1
-    const double df = exp(-r*T);
-    // 2
-    const double F = S0 * exp((r-y)*T);
-    // 3
-    const double std = sigma * sqrt(T);
-    // 4
-    const double d = log(F/K) / std;
-    // 5, 6
-    const double d1 = d + 0.5 * std, d2 = d1 - std;
-    // 7, 8
-    const double nd1 = normalCdf(d1), nd2 = normalCdf(d2);
-    
-    // 9
-    const double c = df * (F * nd1 - K * nd2);
+```python
+import math
 
-    return c;
-}
+
+def normal_cdf(x: float) -> float:
+    # Φ(x) = 0.5 * erfc(-x / sqrt(2))
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
+
+
+def BlackScholes(
+    S0: float,
+    r: float,
+    y: float,
+    sigma: float,
+    K: float,
+    T: float,
+) -> float:
+    # 1
+    df = math.exp(-r * T)
+    # 2
+    F = S0 * math.exp((r - y) * T)
+    # 3
+    std = sigma * math.sqrt(T)
+    # 4
+    d = math.log(F / K) / std
+    # 5, 6
+    d1 = d + 0.5 * std
+    d2 = d1 - std
+    # 7, 8
+    nd1 = normal_cdf(d1)
+    nd2 = normal_cdf(d2)
+
+    # 9
+    c = df * (F * nd1 - K * nd2)
+
+    return c
 ```
 
 根据上式，计算一次看涨期权价格的开销是：两次正态分布运算，两次指数运算，一次开方，十次乘法和除法运算。在实际应用中，一次期权定价不仅需要计算期权的价格，还需要返回价格对各个入参的偏导数。
 
-例如，我们称Delta是期权价格 ($C$) 相对于标的资产现货价格 ($S_0$) 变动的敏感度，在数学上，它是期权价格对标的资产价格的一阶偏导数：
+例如，我们通常所说的Delta是期权价格 ($C$) 相对于标的资产现货价格 ($S_0$) 变动的敏感度，在数学上，它是期权价格对标的资产价格的一阶偏导数：
 
 $$
 \Delta = \frac{\partial C}{\partial S_0}
 $$
 
-计算偏导数有多种方法，一般来说，期权的价格计算比较复杂，没法写出显式的表达式，因此在一个通用的计算框架里，我们常常用有限差分法计算偏导数，在衍生品定价领域也称Bumping Method。
+计算偏导数有多种方法，一般而言，期权的价格计算比较复杂，没法写出显式的表达式，因此在一个通用的计算框架里，我们常常用有限差分法计算偏导数，在衍生品定价领域也称Bumping Method。
 
 ### 1. 有限差分
 
@@ -90,7 +105,7 @@ $$
 \frac{\partial C}{\partial \sigma} \approx \frac{C(S_0, r, y, \sigma + \varepsilon, K, T) - C(S_0, r, y, \sigma, K, T)}{\varepsilon}
 $$
 
-对香草看涨期权，`BlackScholes`定价函数有6个输入项，在不考虑精度的情况下，用前向差分法计算所有的一阶偏导数需要进行额外的6次`BlackScholes`计算，因此前向差分的计算复杂度与入参个数呈线性关系。
+对香草看涨期权，`BlackScholes`定价函数有6个输入项，在不考虑精度的情况下，用前向差分法计算所有的一阶偏导数需要进行额外的6次`BlackScholes`计算，因此前向差分的计算开销与入参个数呈线性关系。
 
 ### 2. 公式法
 
@@ -113,105 +128,116 @@ $$
 n(x) = \frac{\partial N(x)}{\partial x} = \frac{1}{\sqrt{2\pi}} \exp \left( -\frac{x^2}{2} \right)
 $$
 
-然而，简单的应用公式法也并不便宜，注意对每个偏导数的计算，我们仍然需要一次与`BlackScholes`函数相当的开销，并且偏导数计算的次数相对于入参个数仍然是线性的。
+然而，简单的应用公式法并不便宜，注意对每个偏导数的计算，我们仍然需要一次与`BlackScholes`函数相当的开销，并且偏导数计算的次数相对于入参个数仍然是线性的。
 
 以下我们称该种方法为`Naive Formula Method`，因为不难观察到这些偏导数公式中有许多公共的部分，只要经过合理的编排，将公共的子表达式提取出来，计算的开销就能大幅降低。
 
-例如在计算$\frac{\partial C}{\partial S_0}$时，我们可以把$N(d_1)$的结果保存下来，之后只需额外的几次乘法就可以得到$\frac{\partial C}{\partial y}$；同样的，$N(d_2)$可以在 $\frac{\partial C}{\partial r}$和$\frac{\partial C}{\partial K}$中复用。（这里不太能指望CSE帮助我们）
+例如在计算$\frac{\partial C}{\partial S_0}$时，我们可以把$N(d_1)$的结果保存下来，只需额外的几次乘法就可以得到$\frac{\partial C}{\partial y}$；同样的，$N(d_2)$可以在 $\frac{\partial C}{\partial r}$和$\frac{\partial C}{\partial K}$中复用。（这里不太能指望CSE帮助我们）
 
-经过一些努力，我们得到了下面更聪明更快的计算方法`Clever Formula`：
+经过一些努力，我们得到了下面更聪明更快的计算方法，我们称为`Clever Formula Method`：
 
-```cpp
-struct BSGreeks {
-    double price;   // C
-    double dS0;     // ∂C/∂S0
-    double dr;      // ∂C/∂r
-    double dy;      // ∂C/∂y
-    double dSigma;  // ∂C/∂σ
-    double dK;      // ∂C/∂K
-    double dT;      // ∂C/∂T
-};
+```python
+import math
+from dataclasses import dataclass
 
-inline double normal_pdf(double x)
-{
-    static const double inv_sqrt_2pi = 0.39894228040143267794; // 1 / sqrt(2π)
-    return inv_sqrt_2pi * std::exp(-0.5 * x * x);
-}
 
-inline double normal_cdf(double x)
-{
-    // Φ(x) = 0.5 * erfc(-x / sqrt(2))
-    return 0.5 * std::erfc(-x / std::sqrt(2.0));
-}
+INV_SQRT_2PI: float = 0.39894228040143267794  # 1 / sqrt(2π)
 
-BSGreeks BlackFormula(
-    double S0,     // spot
-    double r,      // risk-free rate
-    double y,      // dividend yield
-    double sigma,  // volatility
-    double K,      // strike
-    double T       // maturity
-)
-{
-    BSGreeks g{};
 
-    const double DF     = std::exp(-r * T);            
-    const double F      = S0 * std::exp((r - y) * T);  
-    const double sqrtT  = std::sqrt(T);
-    const double stdDev = sigma * sqrtT;               
-    const double d      = std::log(F / K) / stdDev;
-    const double d1     = d + 0.5 * stdDev;
-    const double d2     = d - 0.5 * stdDev;
+def normal_pdf(x: float) -> float:
+    # 标准正态分布的密度函数 n(x)
+    return INV_SQRT_2PI * math.exp(-0.5 * x * x)
 
-    const double N1 = normal_cdf(d1);
-    const double N2 = normal_cdf(d2);
-    const double n1 = normal_pdf(d1);
 
-    const double DF_F = DF * F;  // DF * F
-    const double DF_K = DF * K;  // DF * K
+def normal_cdf(x: float) -> float:
+    # 标准正态分布的累积分布函数 N(x)
+    # N(x) = 0.5 * erfc(-x / sqrt(2))
+    return 0.5 * math.erfc(-x / math.sqrt(2.0))
 
-    g.price = DF * (F * N1 - K * N2);
 
-    g.dS0    = DF_F / S0 * N1;                  // ∂C/∂S0
-    g.dr     = DF_K * T * N2;                   // ∂C/∂r
-    g.dy     = -DF_F * T * N1;                  // ∂C/∂y
-    g.dSigma = DF_F * n1 * sqrtT;               // ∂C/∂σ
-    g.dK     = -DF * N2;                      // ∂C/∂K
-    g.dT     = DF_F * n1 * sigma / (2.0*sqrtT)  // ∂C/∂T
-               + r * DF_K * N2
-               - y * DF_F * N1;
+@dataclass
+class BSGreeks:
+    price: float   # C
+    dS0: float     # ∂C/∂S0
+    dr: float      # ∂C/∂r
+    dy: float      # ∂C/∂y
+    dSigma: float  # ∂C/∂σ
+    dK: float      # ∂C/∂K
+    dT: float      # ∂C/∂T（相对于剩余到期时间 T 的导数）
 
-    return g;
-}
+
+def BlackFormula(
+    S0: float,     # spot
+    r: float,      # risk-free rate
+    y: float,      # dividend yield
+    sigma: float,  # volatility
+    K: float,      # strike
+    T: float,      # maturity
+) -> BSGreeks:
+    DF = math.exp(-r * T)
+    F = S0 * math.exp((r - y) * T)
+    sqrtT = math.sqrt(T)
+    stdDev = sigma * sqrtT
+    d = math.log(F / K) / stdDev
+    d1 = d + 0.5 * stdDev
+    d2 = d - 0.5 * stdDev
+
+    N1 = normal_cdf(d1)
+    N2 = normal_cdf(d2)
+    n1 = normal_pdf(d1)
+
+    DF_F = DF * F  # DF * F
+    DF_K = DF * K  # DF * K
+
+    price = DF * (F * N1 - K * N2)
+
+    dS0 = DF_F / S0 * N1                  # ∂C/∂S0
+    dr = DF_K * T * N2                    # ∂C/∂r
+    dy = -DF_F * T * N1                   # ∂C/∂y
+    dSigma = DF_F * n1 * sqrtT            # ∂C/∂σ
+    dK = -DF * N2                         # ∂C/∂K
+    dT = (                                # ∂C/∂T（T = time-to-maturity）
+        DF_F * n1 * sigma / (2.0 * sqrtT)
+        + r * DF_K * N2
+        - y * DF_F * N1
+    )
+
+    return BSGreeks(
+        price=price,
+        dS0=dS0,
+        dr=dr,
+        dy=dy,
+        dSigma=dSigma,
+        dK=dK,
+        dT=dT,
+    )
 ```
 
-我们自然会想，对`Clever Formula Method`来说，计算复杂度是什么。要回答这个问题，我们必须弄明白我们是如何提取公共子表达式的。注意到在 BS 模型中，期权价格 $C$ 是远期价格 $F$ 的函数，而 $F$ 是 $S_0$ 和 $y$（以及 $r$ 和 $T$）的函数，根据链式法则：
+问题是，对`Clever Formula Method`来说，计算复杂度该如何分析。要回答这个问题，我们必须弄明白我们是如何提取公共子表达式的。注意到在 BS 模型里，期权价格 $C$ 是远期价格 $F$ 的函数，而 $F$ 是 $S_0$ 和 $y$（以及 $r$ 和 $T$）的函数，由链式法则：
 
 $$
 \frac{\partial C}{\partial S_0} = \frac{\partial C}{\partial F} \frac{\partial F}{\partial S_0}, \quad \frac{\partial C}{\partial y} = \frac{\partial C}{\partial F} \frac{\partial F}{\partial y}
 $$
 
-在`Clever Formula Method`中，我们看到$\frac{\partial C}{\partial S_0}$和$\frac{\partial C}{\partial y}$的公共子表达式$N(d_1)$，正是$\frac{\partial C}{\partial F}$。
-
-所有变量的依赖关系如下图所示，它可以启发我们如何提取各个表达式中的公共子表达式。
+在`Clever Formula Method`中，我们看到$\frac{\partial C}{\partial S_0}$和$\frac{\partial C}{\partial y}$的公共子表达式$N(d_1)$，正是$\frac{\partial C}{\partial F}$，这启发了我们如何提取各个表达式中的公共子表达式。
 
 ![计算图](picture/computation_graph.png)
 
-由上图我们可以看到$S_0$如何影响最终结果$C$，它先参与了$F$的计算，$F$决定了$d$和 $v$的数值，$d$进入$d_1,d_2$，$d_1,d_2$变换到$nd_1,nd_2$，$nd_1,nd_2$传导到$v$，最后是一个恒等映射$C = v$。
+由上图我们看到$S_0$如何影响最终结果$C$，首先它参与$F$的计算，$F$决定了$d$和 $v$的数值，$d$进入$d_1和d_2$，$d_1,d_2$变换到$nd_1,nd_2$，$nd_1,nd_2$传导到$v$，最后是一个恒等映射$C = v$。
 
 $$S_0 \longrightarrow F \longrightarrow \{d, v\} \longrightarrow \{d_1, d_2\} \longrightarrow \{nd_1, nd_2\} \longrightarrow v \xrightarrow{\text{恒等映射}} C$$
 
 为方便描述，我们定义最终结果$C$对变量$x$的导数为$x$的伴随，记作$\overline{x}$。
 
-例如，$S_0$的伴随可以表示为
+例如，$S_0$的伴随表示为
 
 $$
 \overline{S_0} = \frac{\partial C}{\partial S_0} =\frac{\partial C}{\partial F} \frac{\partial F}{\partial S_0} = \frac{\partial F}{\partial S_0} \overline{F} = \frac{F}{S_0} \overline{F}
 $$
 
-注意$F$是$S_0$的函数，而用伴随时，$\overline{S_0}$是$\overline{F}$的函数，这是一种普适的关系。
+注意$F$是$S_0$的函数，而用伴随表示时，$\overline{S_0}$是$\overline{F}$的函数，这是一种普适的关系。
 
-接下来，注意到$F$指向了$d$和$v$，根据链式法则，它的伴随是两条路径的梯度之和。
+接下来，注意到$F$指向了$d$和$v$，根据链式法则，它的梯度是两条路径的梯度之和。
 
 $$
 \begin{aligned}
@@ -272,107 +298,95 @@ $$
 
 也即从最终结果的伴随开始，沿着与函数计算相反的顺序进行伴随的求解，最终正好每个变量被计算了一次，这给出了我们合并子表达式的标准过程。
 
-对其他变量的进行相同的过程，最终得到
+对其他变量的进行相同的处理，最终得到
 ![计算图](picture/backpropagate_cg.png)
 
-下面是利用伴随微分方法求解Greeks的代码。
+下面是利用伴随微分法求解 Greeks 的 Python 代码。
 
-```cpp
-#include <cmath>
-#include <algorithm>
+```python
+def BlackAdjoint(
+    S0: float,
+    r: float,
+    y: float,
+    sigma: float,
+    K: float,
+    T: float,
+) -> BSGreeks:
+    C_ = 1.0  # 种子：∂C/∂v = 1
 
-double normalDens(double x) {
-    static const double inv_sqrt_2pi = 0.39894228040143267794;
-    return inv_sqrt_2pi * std::exp(-0.5 * x * x);
-}
+    # --- Forward Pass (Evaluation) ---
+    sqrtT = math.sqrt(T)
 
-BSGreeks BlackAdjoint(
-    const double S0,
-    const double r,
-    const double y,
-    const double sig,
-    const double K,
-    const double T)
-{
-    const double C_ = 1.0;
+    df = math.exp(-r * T)
+    F = S0 * math.exp((r - y) * T)
+    std = sigma * sqrtT
+    d = math.log(F / K) / std
+    d1 = d + 0.5 * std
+    d2 = d - 0.5 * std
 
-    // --- Forward Pass (Evaluation) ---
+    nd1 = 0.5 * math.erfc(-d1 / math.sqrt(2.0))
+    nd2 = 0.5 * math.erfc(-d2 / math.sqrt(2.0))
 
-    const double sqrtT = std::sqrt(T);
+    v = df * (F * nd1 - K * nd2)
 
-    const double df  = std::exp(-r * T);
-    const double F   = S0 * std::exp((r - y) * T);
-    const double std = sig * sqrtT;
-    const double d   = std::log(F / K) / std;
-    const double d1  = d + 0.5 * std;
-    const double d2  = d - 0.5 * std;
+    # --- Reverse Pass (Adjoint Calculation) ---
+    S0_ = 0.0
+    r_ = 0.0
+    y_ = 0.0
+    sig_ = 0.0
+    K_ = 0.0
+    T_ = 0.0
 
-    const double nd1 = 0.5 * std::erfc(-d1 / std::sqrt(2.0));
-    const double nd2 = 0.5 * std::erfc(-d2 / std::sqrt(2.0));
+    df_ = C_ * (F * nd1 - K * nd2)
+    F_ = C_ * df * nd1
+    K_loc_ = C_ * df * (-nd2)
+    nd1_ = C_ * df * F
+    nd2_ = C_ * df * (-K)
 
-    const double v = df * (F * nd1 - K * nd2);
+    d1_ = nd1_ * normal_pdf(d1)
+    d2_ = nd2_ * normal_pdf(d2)
 
-    // --- Reverse Pass (Adjoint Calculation) ---
+    d_ = d1_ + d2_
+    std_ = 0.5 * d1_ - 0.5 * d2_
 
-    double S0_  = 0.0;
-    double r_   = 0.0;
-    double y_   = 0.0;
-    double sig_ = 0.0;
-    double K_   = 0.0;
-    double T_   = 0.0;
+    F_ += d_ / (F * std)
+    K_loc_ -= d_ / (K * std)
+    std_ -= d_ * d / std
 
-    double df_    = C_ * (F * nd1 - K * nd2);
-    double F_     = C_ * df * nd1;
-    double K_loc_ = C_ * df * (-nd2);
-    double nd1_   = C_ * df * F;
-    double nd2_   = C_ * df * (-K);
+    K_ += K_loc_
 
-    double d1_ = nd1_ * normalDens(d1);
-    double d2_ = nd2_ * normalDens(d2);
+    sig_ += std_ * sqrtT
+    T_ += std_ * sigma / (2.0 * sqrtT)
 
-    double d_   = d1_ + d2_;
-    double std_ = 0.5 * d1_ - 0.5 * d2_;
+    dF_dS0 = F / S0
+    dF_dr = T * F
+    dF_dy = -T * F
+    dF_dT = (r - y) * F
 
-    F_     += d_ / (F * std);
-    K_loc_ -= d_ / (K * std);
-    std_   -= d_ * d / std;
+    S0_ += F_ * dF_dS0
+    r_ += F_ * dF_dr
+    y_ += F_ * dF_dy
+    T_ += F_ * dF_dT
 
-    K_ += K_loc_;
+    ddf_dr = -T * df
+    ddf_dT = -r * df
 
-    sig_ += std_ * sqrtT;
-    T_   += std_ * sig / (2.0 * sqrtT);
+    r_ += df_ * ddf_dr
+    T_ += df_ * ddf_dT
 
-    const double dF_dS0 = F / S0;
-    const double dF_dr  = T * F;
-    const double dF_dy  = -T * F;
-    const double dF_dT  = (r - y) * F;
-
-    S0_ += F_ * dF_dS0;
-    r_  += F_ * dF_dr;
-    y_  += F_ * dF_dy;
-    T_  += F_ * dF_dT;
-
-    const double ddf_dr = -T * df;
-    const double ddf_dT = -r * df;
-
-    r_ += df_ * ddf_dr;
-    T_ += df_ * ddf_dT;
-
-    BSGreeks g{};
-    g.price  = v;
-    g.dS0    = S0_;
-    g.dr     = r_;
-    g.dy     = y_;
-    g.dSigma = sig_;
-    g.dK     = K_;
-    g.dT     = T_;
-
-    return g;
-}
+    return BSGreeks(
+        price=v,
+        dS0=S0_,
+        dr=r_,
+        dy=y_,
+        dSigma=sig_,
+        dK=K_,
+        dT=T_,
+    )
 ```
 ### 自动微分
 
-在之前的求解过程中，我们手动引入了诸如 $DF, F, std $等中间变量，从更一般的视角来看，Black-Scholes 公式本质上由加减乘除和正态分布等基本函数组合而成，将这些更基本的运算视为节点，我们会得到一张更细粒度、包含大量中间变量的计算图。随着模型复杂度的增加，手动实现伴随微分变得几乎不可行。此时需要借助自动微分框架：只需编写前向传播的代码，框架会自动构建计算图并跟踪梯度。下面是Pytorch的版本。
+在之前的求解过程中，我们手动引入了诸如 $DF, F, std$等中间变量，从更一般的视角来看，BlackScholes 公式本质上由加减乘除以及正态分布等基本函数组合而成，将这些更基本的运算视为节点，我们会得到一张更细粒度、包含大量中间变量的计算图。然而随着模型复杂度的增加，手动实现伴随微分变得几乎不可行，此时需要借助自动微分框架：只需编写前向传播的代码，框架会自动构建计算图并跟踪梯度。下面是Pytorch的版本。
 
 ```python
 import torch
@@ -423,38 +437,14 @@ def BlackTorch(
         "dT":     float(T_t.grad.item()),     # ∂C/∂T   
     }
 ```
-Torch在背后为我们构建了下面的计算图，它完全对应着BS公式，以最左边的一条线为例，`r` 和 `T` 进入 `MulBackward0` ($r \times T$) $\rightarrow$ `NegBackward0` ($-rT$) $\rightarrow$ `ExpBackward0` ($e^{-rT}$)，其他的诸如此类。
+Torch在背后为我们构建了下面的计算图，它完全对应着BS公式，以最左边的一条线为例，`r` 和 `T` 进入 `MulBackward0` ($r \times T$) $\rightarrow$ `NegBackward0` ($-rT$) $\rightarrow$ `ExpBackward0` ($e^{-rT}$)，诸如此类。
 
 ![计算图](picture/bs_computation_graph.png)
 
-### 性能测试
-
-在正式讨论复杂度之前，我们先来进行性能测试，在同一组参数下进行了 1,000,000 次定价计算。测试环境使用单线程 `-O3` 编译优化，参数如下：
-> $S_0 = 100, r = 1\%, y = 0, \sigma = 20\%, K = 100, T = 1$
-
-测试结果汇总如下表所示：
-
-| 方法名称 | 耗时 (1M次) | 相对前向计算倍数 |
-| :--- | :--- | :--- |
-| **Finite Difference** (有限差分) | ~ 222.8 ms | ≈ 10.5 × |
-| **Naive Formulas** (朴素公式法) | ~ 188.2 ms | ≈ 8.9 × |
-| **Adjoint (AAD)** (自动微分/伴随) | ~ 54.5 ms | ≈ 2.6 × |
-| **Optimized Formulas** (优化公式法) | ~ 48.1 ms | ≈ 2.3 × |
-
-#### 结果分析与小结
-
-1.  **AAD vs. 有限差分**：
-    AAD 的优势是压倒性的。有限差分每增加一个 Greek 就需要多运行一次完整的定价函数；而 AAD 通过一次反向传播即可获得所有参数的梯度。在本例中只有 6 个参数，差距已达 4 倍以上；如果在包含数百个风险因子的复杂模型（如 xVA 或 Local Volatility Calibration）中，这一差距将扩大到数百倍。
-
-2.  **为什么 AAD 比“优化公式法”略慢？**
-    你可能会注意到，通用性更强的 Adjoint (50.3 ms) 略慢于手动优化的公式法 (43.9 ms)。这是完全合理的：
-    *   **代数化简 vs. 机械求导**：优化公式法利用了 BS 模型的数学特性（如 Gamma 的解析解极其简洁）进行了代数层面的化简。
-    *   **计算开销**：AAD 是“机械地”对每一步运算应用链式法则。虽然它避免了重复计算，但在反向累加梯度时，仍然包含了一些加法和乘法操作，而这些操作在解析解的最终形态中可能已经被数学消去了。
-
 ### 复杂度分析
-为方便分析，我们限定在$\odot \in \{+, \cdot, /\}$ 的域$K$上讨论，设 $F(x_1, ..., x_n)$ 是一个变量为 $x_1, ..., x_n \in K$ 的有理函数
+现在我们可以正式的来分析伴随微分方法的复杂度，以下限定在$\odot \in \{+, \cdot, /\}$ 的域$K$上讨论，设 $F(x_1, ..., x_n)$ 是变量为 $x_1, ..., x_n \in K$ 的有理函数
 
-**定义** 我们称计算 $F$ 的运算序列 $\{g_1, ..., g_s\}$ 是一个**直线程序（straight-line programs，简称SLP）**，如果每个 $g_i$ 都属于以下形式之一：  
+**定义** 称计算 $F$ 的运算序列 $\{g_1, ..., g_s\}$ 是一个**直线程序（straight-line programs，简称SLP）**，如果每个 $g_i$ 都属于以下形式之一：  
 (1) $g_i \leftarrow g_j \odot g_k$，其中 $j, k < i$；  
 (2) $g_i \leftarrow g_j \odot c$，其中 $j < i$ 且 $c \in K$；  
 (3) $g_i \leftarrow x_k \odot x_l$；  
@@ -463,7 +453,7 @@ Torch在背后为我们构建了下面的计算图，它完全对应着BS公式�
 
 规定运算序列的最后一项$g_s$ 给出 $F(x_1, ..., x_n)$的结果。
 
-举例来说，我们希望求值 $F(x_1, x_2, x_3) = 5 - x_1 x_2^2 / x_3$，它可由以下运算序列计算：
+举例来说，函数 $F(x_1, x_2, x_3) = 5 - x_1 x_2^2 / x_3$可由以下运算序列计算：
 
 $$
 \begin{aligned}
@@ -475,19 +465,19 @@ g_5 &\leftarrow 5 + g_4
 \end{aligned}
 $$
 
-那么上述序列就是一个计算 $F$ 的 SLP，显然 SLP 并不唯一，我们称 $T(F)$是计算$F$的最小操作数，即
+那么$\{g_1,g_2,g_3,g_4,g_5\}$就是一个计算 $F$ 的 SLP，显然 SLP 并不唯一，我们定义 $T(F)$是计算$F$的最短$SLP$的长度，即
 
 $$
 T(F) = \min_{\Gamma} \{ s \mid \Gamma = (g_1, \dots, g_s) \text{ computes } F \}
 $$
 
-我们已经知道前向差分法（Forward Differentiation）的复杂度与入参的个数$x_1,x_2,...x_n$成正比，它的算数复杂度可以表示为
+如前所述，前向差分法（Forward Differentiation）的复杂度与入参的个数$x_1,x_2,...x_n$成正比，它的算数复杂度可以表示为
 
 $$
 T_{\text{fwd}}(\nabla F(x_1, \dots, x_n)) \in O\left( n \cdot T(F(x_1, \dots, x_n)) \right)
 $$
 
-下面我们将证明，应用反向传播（Reverse Mode）计算导数时，其计算复杂度与输入维度 $n$ 无关。事实上，Baur-Strassen 定理给出了如下的复杂度界限：
+下面我们将证明，应用伴随微分法计算导数时，其计算复杂度与输入维度 $n$ 无关。事实上，Baur-Strassen 定理给出了如下估计：
 
 **Theorem (Baur-Strassen):**
 
@@ -497,12 +487,10 @@ $$
 
 其中 $T(F)$ 表示计算函数 $F$ 的最小算术运算次数。
 
-证明并不复杂，但也没什么必要，如果你相信我的话可以略过...
-
 证明:
 
 
-假设 $\{g_1, \dots, g_s\}$ 是计算 $F(x_1, \dots, x_n)$ 的最小长度 SLP，定义 $F^{(i)}$ 为由 $g_i, \dots, g_s$ 计算的函数。
+假设 $\{g_1, \dots, g_s\}$ 是计算 $F(x_1, \dots, x_n)$ 的最短 SLP，定义 $F^{(i)}$ 为由 $g_i, \dots, g_s$ 计算的函数。
 
 以之前的 SLP 为例
 $$
@@ -519,12 +507,12 @@ $$
 
 $$ F(x_1, x_2, x_3) = 5 - \frac{x_1 x_2^2}{x_3} $$
 
-$F^{(i)}$ 的定义可以理解为：前 $i-1$ 步已经计算完成，由剩下的步骤所组成的函数。
+$F^{(i)}$ 理解为：前 $i-1$ 步已经计算完成，由剩下的步骤所组成的函数。
 
 当$i=1$，运算还未开始，
 $$F^{(1)}(x_1,x_2,x_3) = F = 5 - \frac{x_1 x_2^2}{x_3}$$
 
-当$i=3$，$g_1$ ($x_2^2$) 和 $g_2$ ($x_1 g_1$) 已经计算完成，他们的结果变为已知量，则输入变量变为$\{x_1, x_2, x_3, \mathbf{g_1}, \mathbf{g_2}\}$，剩余的步骤是$\{g_3, g_4, g_5\}$
+当$i=3$，$g_1$ [$x_2^2$] 和 $g_2$ [$x_1 g_1$] 已经计算完成，他们的计算结果变为已知量，则$F^{(3)}$的输入变为$\{x_1, x_2, x_3, g_1, g_2\}$，剩余的步骤是$\{g_3, g_4, g_5\}$
 
 $$ F^{(3)}(x_1, x_2, x_3, g_1, g_2) = 5 - \frac{g_2}{x_3} $$
 
@@ -540,7 +528,7 @@ $$
 
 一般的，$F^{(i)}$的变量集合为 $\{x_1, \dots, x_n, g_1, \dots, g_{i-1}\}$，为了便于说明，我们将变量重命名为 $\{z_1, \dots, z_{n+s}\}$，当 $j \leq n$ 时 $z_j = x_j$，当 $j > n$ 时 $z_j = g_{j-n}$。
 
-证明的思路是归纳法,假设 $F^{(i+1)}$ 的导数已经计算完成，成本是至多 $5(s - i)$ 次运算，需要证明至多 $5(s - i + 1)$ 次运算可以计算出 $F^{(i)}$ 的所有导数。
+证明的思路是归纳法，假设 $F^{(i+1)}$ 的导数可以由至多 $5(s - i)$ 次运算计算完成，需要证明至多 $5(s - i + 1)$ 次运算可以计算出 $F^{(i)}$ 的所有导数。
 
 **Base case：** $i = s$。  
 
@@ -552,10 +540,12 @@ $$
 1, & \text{if } z_j = g_s \\
 0, & \text{if } z_j \neq g_s
 \end{cases}
-$$。这需要 0 次运算。
+$$
+
+这需要 0 次运算。
 
 **Induction：**  
-假设我们用至多 $5(s - i)$ 次运算计算出了所有的$\frac{\partial F^{(i+1)}}{\partial z_j}$，需要证明只需额外的 5 次运算即可计算出所有的 $\frac{\partial F^{(i)}}{\partial z_j}$。
+假设我们用至多 $5(s - i)$ 次运算计算出了所有的$\frac{\partial F^{(i+1)}}{\partial z_j}$，需要证明额外的 5 次运算可以计算出所有的 $\frac{\partial F^{(i)}}{\partial z_j}$。
 
 注意到$F^{(i)}$ 可通过$F^{(i+1)}$和$g_i$计算得到，具体来说，假设 $g_i = s_b \odot s_\ell$，则：
 
@@ -574,7 +564,7 @@ $$
 \frac{\partial F^{(i)}}{\partial s_k} = \frac{\partial F^{(i+1)}}{\partial s_k} + \frac{\partial F^{(i+1)}}{\partial g_i} \cdot \frac{\partial g_i}{\partial s_k}, \quad \text{for } k \in \{b, \ell\}
 $$
 
-只需逐个讨论即可
+接下来分情况讨论即可
 
 **case 1：** $g_i = z_t + z_{t'}$  
 此时
@@ -584,7 +574,7 @@ $$
 \frac{\partial F^{(i)}}{\partial z_{t'}} &= \frac{\partial F^{(i+1)}}{\partial z_{t'}} + \frac{\partial F^{(i+1)}}{\partial g_i}
 \end{aligned}
 $$
-注意我们假设$F^{(i+1)}$的导数都已计算完成，因此这两个更新只需 1 次加法运算，总共需要 **2 次运算**。
+由于我们假设$F^{(i+1)}$的导数都已计算完成，这两个导数的更新分别只需 1 次加法运算，总共 **2 次运算**。
 
 **case 2：** $g_i = z_t \cdot z_{t'}$
 
@@ -615,4 +605,212 @@ $$
 总计**5 次运算**。
 这三种情况也覆盖了 $s_b$ 或 $s_\ell$ 是标量的情况，证明就此完成。
 
+### 性能测试
 
+在同一组参数下进行 1,000,000 次定价计算，测试环境使用单线程 `-O3` 编译优化，参数如下：
+> $S_0 = 100, r = 1\%, y = 0, \sigma = 20\%, K = 100, T = 1$
+
+不同方法的测试结果如下表所示：
+
+| 方法名称 | 耗时 (1M次) | 相对前向计算倍数 |
+| :--- | :--- | :--- |
+| **Finite Difference** | ~ 222.8 ms | ≈ 10.5 × |
+| **Naive Formulas Method**  | ~ 188.2 ms | ≈ 8.9 × |
+| **Adjoint Differentiation** | ~ 54.5 ms | ≈ 2.6 × |
+| **Clever Formula Method** | ~ 48.1 ms | ≈ 2.3 × |
+
+这个场景中有6个参数，伴随微分方法相较于有限差分方法快了4倍，比理论分析还要快，这是因为$Baur-Strassen$定理仅考虑了加减乘除等基本运算，对于更复杂的函数$e^x$，伴随微分方法的优势更为明显，因为它只需在前向计算时将结果保存下来。随着参数的增加，有限差分方法和伴随微分方法的差距会进一步拉开。另一边，我们手动提取公共子表达式的`Clever Formula Method`比伴随微分方法还要略快，因为`Clever Formula Method`利用 BS 模型的数学特性进行了更多的优化，并且可以更彻底的减少重复运算，但大多时候，我们甚至无法找到一个闭式解，只能用有限元或者蒙特卡洛等数值方法求解，在数值求解时应用自动微分是实际应用中最主要的场景。
+
+### 伴随微分与蒙特卡洛
+
+考虑一个参数化的随机变量族 $(P(\theta))_{\theta\in\Theta}$，其中 $\theta$ 是衍生证券的特定参数，$\Theta \subset \mathbb{R}$ 是一个区间，$P(\theta)$ 是衍生证券的支付函数（payoff function）。定义
+
+$$ V(\theta) := \mathbb{E}[P(\theta)]$$
+
+为特定衍生证券的价格 [6]。
+
+这一节我们关注只能对$V(\theta)$进行估计的情况，根据强大数定律，如果 $P_1, P_2, \dots, P_N$ 是独立同分布（i.i.d.）的随机变量样本，样本均值是期望的无偏估计
+
+$$ \hat{V}(\theta) = \frac{1}{N} \sum_{n=1}^N P_n(\theta) $$
+
+$$ \frac{1}{N} \sum_{n=1}^N P_n(\theta) \xrightarrow{N\to\infty} \mathbb{E}[P(\theta)] = V(\theta) $$
+
+有关蒙特卡洛方法的直观介绍，请参考 [Scratchapixel: Monte Carlo Methods in Practice](https://www.scratchapixel.com/lessons/mathematics-physics-for-computer-graphics/monte-carlo-methods-in-practice/monte-carlo-methods.html)。
+
+现在让我们考虑如何估计$\dot{V}$ 或 $\partial_\theta V$，通常这时候只能用有限差分
+$$ \hat{\dot{V}}(\theta) \approx \frac{\hat{V}(\theta + \epsilon) - \hat{V}(\theta)}{\epsilon} $$
+
+但如果支付函数足够平滑，我们可以交换极限符号
+
+$$ \dot{V}(\theta) = \frac{\partial}{\partial \theta} \mathbb{E}[P(\theta)] = \mathbb{E}\left[ \frac{\partial P(\theta)}{\partial \theta} \right] $$
+
+定义 $\dot{P}(\theta) := \frac{\partial P(\theta)}{\partial \theta}$ 为单个路径中支付函数对参数的导数，那么 $\dot{V}(\theta)$ 的估计量为：
+
+$$ \hat{\dot{V}}(\theta) = \frac{1}{N} \sum_{n=1}^N \dot{P}_n(\theta) $$
+
+以看涨期权为例，它的支付函数为
+$$
+P(S_T) = \max(S_T - K, \, 0) 
+$$
+
+根据风险中性定价原理，期权价格是其未来收益的期望值：
+
+$$ V = e^{-rT} \mathbb{E}^Q [ \max(S_T - K, 0) ] $$
+
+利用蒙特卡洛方法求解该期望值的步骤大致如下
+
+#### 第一步：生成随机样本
+我们需要模拟 $N$ 条路径，首先生成 $N$ 个服从标准正态分布的随机数：
+$$ Z_1, Z_2, \dots, Z_N \sim \mathcal{N}(0, 1) $$
+
+#### 第二步：计算到期资产价格 ($S_T$)
+计算每一条路径在 $T$ 时刻的资产价格
+
+$$ S_T^{(n)} = S_0 \cdot \exp\left( \left( r - y - \frac{1}{2}\sigma^2 \right)T + \sigma \sqrt{T} Z_n \right) $$
+其中 $n = 1, \dots, N$。
+
+#### 第三步：计算期权支付 (Payoff)
+对于每一条路径，计算期权到期时的赔付。对于看涨期权：
+
+$$ P_n = \max(S_T^{(n)} - K, \, 0) $$
+
+*(如果 $S_T^{(n)} < K$，则该路径的期权价值为 0)*
+
+#### 第四步：求平均
+将所有路径的支付取算术平均，折现回当前时刻（乘以 $e^{-rT}$）：
+
+$$ \hat{V} = e^{-rT} \left( \frac{1}{N} \sum_{n=1}^N P_n \right) $$
+
+```python
+import numpy as np
+
+
+def BlackMC_NumPy_FD_Forward(
+    S0: float,
+    r: float,
+    y: float,
+    sigma: float,
+    K: float,
+    T: float,
+    num_sims: int = 100000,
+    seed: int = 12345,
+    epsilon: float = 1e-4,
+):
+    """
+    使用 NumPy + 前向差分 (Forward Difference) 计算价格和 Greeks。
+    利用公共随机数：1 次基准估值 + 6 次扰动估值 = 7 次定价。
+    """
+    # 1. 固定随机种子并生成公共随机数 (Common Random Numbers)
+    np.random.seed(seed)
+    Z = np.random.standard_normal(num_sims)
+
+    # 定义内部定价核函数（不在此处改变 Z）
+    def pricing_kernel(_S0, _r, _y, _sigma, _K, _T):
+        drift = (_r - _y - 0.5 * _sigma**2) * _T
+        vol = _sigma * np.sqrt(_T)
+        ST = _S0 * np.exp(drift + vol * Z)
+        payoff = np.maximum(ST - _K, 0.0)
+        return np.exp(-_r * _T) * np.mean(payoff)
+
+    # 2. 计算基准价格 (Base Price)
+    base_price = pricing_kernel(S0, r, y, sigma, K, T)
+
+    # 3. 前向差分计算 Greeks: (Price_new - Base_Price) / epsilon
+
+    # --- Delta (dS0)：使用相对扰动 ---
+    p_new = pricing_kernel(S0 * (1.0 + epsilon), r, y, sigma, K, T)
+    dS0 = (p_new - base_price) / (S0 * epsilon)
+
+    # --- Rho (dr) ---
+    p_new = pricing_kernel(S0, r + epsilon, y, sigma, K, T)
+    dr = (p_new - base_price) / epsilon
+
+    # --- Div Rho (dy) ---
+    p_new = pricing_kernel(S0, r, y + epsilon, sigma, K, T)
+    dy = (p_new - base_price) / epsilon
+
+    # --- Vega (dSigma) ---
+    p_new = pricing_kernel(S0, r, y, sigma + epsilon, K, T)
+    dSigma = (p_new - base_price) / epsilon
+
+    # --- Strike Delta (dK) ---
+    p_new = pricing_kernel(S0, r, y, sigma, K + epsilon, T)
+    dK = (p_new - base_price) / epsilon
+
+    # --- Theta (dT) ---
+    p_new = pricing_kernel(S0, r, y, sigma, K, T + epsilon)
+    dT = (p_new - base_price) / epsilon
+
+    return {
+        "price": base_price,
+        "dS0": dS0,
+        "dr": dr,
+        "dy": dy,
+        "dSigma": dSigma,
+        "dK": dK,
+        "dT": dT,
+    }
+```
+
+以下是自动微分的版本，只是把定价核从 NumPy 换到了 PyTorch，并让所有标量参数参与反向传播。
+
+```python
+import torch
+
+
+def BlackMC_Torch(
+    S0: float,
+    r: float,
+    y: float,
+    sigma: float,
+    K: float,
+    T: float,
+    num_sims: int = 100000,
+    seed: int = 12345,
+):
+    dtype = torch.float64
+
+    # 1. 将所有标量参数转换为 Tensor，并开启梯度追踪
+    S0_t = torch.tensor(S0, dtype=dtype, requires_grad=True)
+    r_t = torch.tensor(r, dtype=dtype, requires_grad=True)
+    y_t = torch.tensor(y, dtype=dtype, requires_grad=True)
+    sigma_t = torch.tensor(sigma, dtype=dtype, requires_grad=True)
+    K_t = torch.tensor(K, dtype=dtype, requires_grad=True)
+    T_t = torch.tensor(T, dtype=dtype, requires_grad=True)
+
+    # 2. 生成标准正态分布随机数 (Z)，不参与计算图的导数传播
+    torch.manual_seed(seed)
+    Z = torch.randn(num_sims, dtype=dtype)
+
+    # 3. 前向传播：构建计算图 (Computational Graph)
+    # 漂移项: (r - y - 0.5 * sigma^2) * T
+    drift = (r_t - y_t - 0.5 * sigma_t**2) * T_t
+
+    # 扩散项: sigma * sqrt(T) * Z
+    diffusion = sigma_t * torch.sqrt(T_t) * Z
+
+    # 计算到期价格 S_T
+    ST = S0_t * torch.exp(drift + diffusion)
+
+    # 计算支付 Payoff: max(S_T - K, 0)
+    # torch.relu 在前向传播中等价于 max(x, 0)
+    payoff = torch.relu(ST - K_t)
+
+    # 折现并求期望: e^(-rT) * E[Payoff]
+    DF = torch.exp(-r_t * T_t)
+    price = DF * torch.mean(payoff)
+
+    # 4. 反向传播：自动计算所有梯度
+    price.backward()
+
+    # 5. 提取结果
+    return {
+        "price": float(price.item()),
+        "dS0": float(S0_t.grad.item()),     # Delta
+        "dr": float(r_t.grad.item()),       # Rho
+        "dy": float(y_t.grad.item()),       # Div Rho
+        "dSigma": float(sigma_t.grad.item()),  # Vega
+        "dK": float(K_t.grad.item()),       # Dual Delta (Strike Delta)
+        "dT": float(T_t.grad.item()),       # Theta（数学意义上的 ∂Price/∂T）
+    }
+```
