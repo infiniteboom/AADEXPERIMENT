@@ -20,7 +20,7 @@ $$
 *   $K$ ：期权的行权价
 *   $T$ ：期权的到期时间
 
-计算时会先求出下面的中间变量：
+计算时需要先求出下面的中间变量：
 
 *   折现因子： $DF = \exp(-rT)$
 *   远期价格： $F = S_0 \exp[(r - y)T]$
@@ -90,7 +90,7 @@ $$
 回顾导数的定义，导数是下列过程的极限
 
 $$
-\frac{f(x + \varepsilon) - f(x)}{\varepsilon}
+f'(x) = \lim_{\varepsilon \to 0} \frac{f(x + \varepsilon) - f(x)}{\varepsilon}
 $$
 
 我们称该种形式的差分为前向差分，它遵循以下过程：给定其他要素，对某个变量施加微小的扰动$\varepsilon$，分别对函数$f(x+\varepsilon)$与$f(x)$求值，两式相减再除以扰动项$\varepsilon$，即可得到对应输入的偏导数。
@@ -134,7 +134,7 @@ $$
 
 例如在计算$\frac{\partial C}{\partial S_0}$时，我们可以把$N(d_1)$的结果保存下来，只需额外的几次乘法就可以得到$\frac{\partial C}{\partial y}$；同样的，$N(d_2)$可以在 $\frac{\partial C}{\partial r}$和$\frac{\partial C}{\partial K}$中复用。（这里不太能指望CSE帮助我们）
 
-经过一些努力，我们得到了下面更聪明更快的计算方法，我们称为`Clever Formula Method`：
+经过一些努力，我们得到了下面更快的计算方法，我们称为`Clever Formula Method`：
 
 ```python
 import math
@@ -312,76 +312,67 @@ def BlackAdjoint(
     K: float,
     T: float,
 ) -> BSGreeks:
-    C_ = 1.0  # 种子：∂C/∂v = 1
-
     # --- Forward Pass (Evaluation) ---
     sqrtT = math.sqrt(T)
 
-    df = math.exp(-r * T)
-    F = S0 * math.exp((r - y) * T)
-    std = sigma * sqrtT
-    d = math.log(F / K) / std
-    d1 = d + 0.5 * std
-    d2 = d - 0.5 * std
+    discount_factor = math.exp(-r * T)        # DF
+    forward = S0 * math.exp((r - y) * T)      # F
+    std_dev = sigma * sqrtT                   # σ√T
 
-    nd1 = 0.5 * math.erfc(-d1 / math.sqrt(2.0))
-    nd2 = 0.5 * math.erfc(-d2 / math.sqrt(2.0))
+    d = math.log(forward / K) / std_dev
+    d1 = d + 0.5 * std_dev
+    d2 = d - 0.5 * std_dev
 
-    v = df * (F * nd1 - K * nd2)
+    N1 = normal_cdf(d1)
+    N2 = normal_cdf(d2)
+
+    price = discount_factor * (forward * N1 - K * N2)
 
     # --- Reverse Pass (Adjoint Calculation) ---
-    S0_ = 0.0
-    r_ = 0.0
-    y_ = 0.0
-    sig_ = 0.0
-    K_ = 0.0
-    T_ = 0.0
+    price_adjoint = 1.0  # seed: ∂price/∂price = 1
 
-    df_ = C_ * (F * nd1 - K * nd2)
-    F_ = C_ * df * nd1
-    K_loc_ = C_ * df * (-nd2)
-    nd1_ = C_ * df * F
-    nd2_ = C_ * df * (-K)
+    S0_adjoint = 0.0
+    r_adjoint = 0.0
+    y_adjoint = 0.0
+    sigma_adjoint = 0.0
+    K_adjoint = 0.0
+    T_adjoint = 0.0
 
-    d1_ = nd1_ * normal_pdf(d1)
-    d2_ = nd2_ * normal_pdf(d2)
+    discount_factor_adjoint = price_adjoint * (forward * N1 - K * N2)
+    forward_adjoint = price_adjoint * discount_factor * N1
+    K_adjoint += price_adjoint * discount_factor * (-N2)
+    N1_adjoint = price_adjoint * discount_factor * forward
+    N2_adjoint = price_adjoint * discount_factor * (-K)
 
-    d_ = d1_ + d2_
-    std_ = 0.5 * d1_ - 0.5 * d2_
+    d1_adjoint = N1_adjoint * normal_pdf(d1)
+    d2_adjoint = N2_adjoint * normal_pdf(d2)
 
-    F_ += d_ / (F * std)
-    K_loc_ -= d_ / (K * std)
-    std_ -= d_ * d / std
+    d_adjoint = d1_adjoint + d2_adjoint
+    std_dev_adjoint = 0.5 * d1_adjoint - 0.5 * d2_adjoint
 
-    K_ += K_loc_
+    forward_adjoint += d_adjoint / (forward * std_dev)
+    K_adjoint += -d_adjoint / (K * std_dev)
+    std_dev_adjoint += -d_adjoint * d / std_dev
 
-    sig_ += std_ * sqrtT
-    T_ += std_ * sigma / (2.0 * sqrtT)
+    sigma_adjoint += std_dev_adjoint * sqrtT
+    T_adjoint += std_dev_adjoint * sigma / (2.0 * sqrtT)
 
-    dF_dS0 = F / S0
-    dF_dr = T * F
-    dF_dy = -T * F
-    dF_dT = (r - y) * F
+    S0_adjoint += forward_adjoint * (forward / S0)
+    r_adjoint += forward_adjoint * (T * forward)
+    y_adjoint += forward_adjoint * (-T * forward)
+    T_adjoint += forward_adjoint * ((r - y) * forward)
 
-    S0_ += F_ * dF_dS0
-    r_ += F_ * dF_dr
-    y_ += F_ * dF_dy
-    T_ += F_ * dF_dT
-
-    ddf_dr = -T * df
-    ddf_dT = -r * df
-
-    r_ += df_ * ddf_dr
-    T_ += df_ * ddf_dT
+    r_adjoint += discount_factor_adjoint * (-T * discount_factor)
+    T_adjoint += discount_factor_adjoint * (-r * discount_factor)
 
     return BSGreeks(
-        price=v,
-        dS0=S0_,
-        dr=r_,
-        dy=y_,
-        dSigma=sig_,
-        dK=K_,
-        dT=T_,
+        price=price,
+        dS0=S0_adjoint,
+        dr=r_adjoint,
+        dy=y_adjoint,
+        dSigma=sigma_adjoint,
+        dK=K_adjoint,
+        dT=T_adjoint,
     )
 ```
 ### 自动微分
@@ -471,10 +462,10 @@ $$
 T(F) = \min_{\Gamma} \{ s \mid \Gamma = (g_1, \dots, g_s) \text{ computes } F \}
 $$
 
-如前所述，前向差分法（Forward Differentiation）的复杂度与入参的个数$x_1,x_2,...x_n$成正比，它的算数复杂度可以表示为
+如前所述，有限差分法（Finite Difference）的复杂度与入参的个数$x_1,x_2,...x_n$成正比，它的算数复杂度可以表示为
 
 $$
-T_{\text{fwd}}(\nabla F(x_1, \dots, x_n)) \in O\left( n \cdot T(F(x_1, \dots, x_n)) \right)
+T_{\text{fd}}(\nabla F(x_1, \dots, x_n)) \in O\left( n \cdot T(F(x_1, \dots, x_n)) \right)
 $$
 
 下面我们将证明，应用伴随微分法计算导数时，其计算复杂度与输入维度 $n$ 无关。事实上，Baur-Strassen 定理给出了如下估计：
@@ -685,7 +676,7 @@ $$ \hat{V} = e^{-rT} \left( \frac{1}{N} \sum_{n=1}^N P_n \right) $$
 import numpy as np
 
 
-def BlackMC_NumPy_FD_Forward(
+def BlackFiniteDifferenceMC(
     S0: float,
     r: float,
     y: float,
@@ -697,49 +688,56 @@ def BlackMC_NumPy_FD_Forward(
     epsilon: float = 1e-4,
 ):
     """
-    使用 NumPy + 前向差分 (Forward Difference) 计算价格和 Greeks。
-    利用公共随机数：1 次基准估值 + 6 次扰动估值 = 7 次定价。
+    使用前向差分 (Forward Difference) 计算价格和 Greeks。
+   （1 + 6 = 7 次定价）。
     """
     # 1. 固定随机种子并生成公共随机数 (Common Random Numbers)
-    np.random.seed(seed)
-    Z = np.random.standard_normal(num_sims)
+    rng = np.random.default_rng(seed)
+    Z = rng.standard_normal(num_sims)
 
     # 定义内部定价核函数（不在此处改变 Z）
-    def pricing_kernel(_S0, _r, _y, _sigma, _K, _T):
-        drift = (_r - _y - 0.5 * _sigma**2) * _T
-        vol = _sigma * np.sqrt(_T)
-        ST = _S0 * np.exp(drift + vol * Z)
-        payoff = np.maximum(ST - _K, 0.0)
-        return np.exp(-_r * _T) * np.mean(payoff)
+    def pricing_kernel(S0: float, r: float, y: float, sigma: float, K: float, T: float) -> float:
+        drift = (r - y - 0.5 * sigma**2) * T
+        diffusion = sigma * np.sqrt(T) * Z
+        ST = S0 * np.exp(drift + diffusion)
+        payoff = np.maximum(ST - K, 0.0)
+        discount_factor = np.exp(-r * T)
+        return discount_factor * np.mean(payoff)
 
     # 2. 计算基准价格 (Base Price)
     base_price = pricing_kernel(S0, r, y, sigma, K, T)
 
-    # 3. 前向差分计算 Greeks: (Price_new - Base_Price) / epsilon
+    # 3. 前向差分计算 Greeks: (Price_bumped - Base_Price) / bump_size
 
     # --- Delta (dS0)：使用相对扰动 ---
-    p_new = pricing_kernel(S0 * (1.0 + epsilon), r, y, sigma, K, T)
-    dS0 = (p_new - base_price) / (S0 * epsilon)
+    S0_bump = max(abs(S0) * epsilon, epsilon)
+    price_S0_up = pricing_kernel(S0 + S0_bump, r, y, sigma, K, T)
+    dS0 = (price_S0_up - base_price) / S0_bump
 
     # --- Rho (dr) ---
-    p_new = pricing_kernel(S0, r + epsilon, y, sigma, K, T)
-    dr = (p_new - base_price) / epsilon
+    r_bump = epsilon
+    price_r_up = pricing_kernel(S0, r + r_bump, y, sigma, K, T)
+    dr = (price_r_up - base_price) / r_bump
 
     # --- Div Rho (dy) ---
-    p_new = pricing_kernel(S0, r, y + epsilon, sigma, K, T)
-    dy = (p_new - base_price) / epsilon
+    y_bump = epsilon
+    price_y_up = pricing_kernel(S0, r, y + y_bump, sigma, K, T)
+    dy = (price_y_up - base_price) / y_bump
 
     # --- Vega (dSigma) ---
-    p_new = pricing_kernel(S0, r, y, sigma + epsilon, K, T)
-    dSigma = (p_new - base_price) / epsilon
+    sigma_bump = epsilon
+    price_sigma_up = pricing_kernel(S0, r, y, sigma + sigma_bump, K, T)
+    dSigma = (price_sigma_up - base_price) / sigma_bump
 
     # --- Strike Delta (dK) ---
-    p_new = pricing_kernel(S0, r, y, sigma, K + epsilon, T)
-    dK = (p_new - base_price) / epsilon
+    K_bump = max(abs(K) * epsilon, epsilon)
+    price_K_up = pricing_kernel(S0, r, y, sigma, K + K_bump, T)
+    dK = (price_K_up - base_price) / K_bump
 
     # --- Theta (dT) ---
-    p_new = pricing_kernel(S0, r, y, sigma, K, T + epsilon)
-    dT = (p_new - base_price) / epsilon
+    T_bump = max(abs(T) * epsilon, epsilon)
+    price_T_up = pricing_kernel(S0, r, y, sigma, K, T + T_bump)
+    dT = (price_T_up - base_price) / T_bump
 
     return {
         "price": base_price,
@@ -752,13 +750,13 @@ def BlackMC_NumPy_FD_Forward(
     }
 ```
 
-以下是自动微分的版本，只是把定价核从 NumPy 换到了 PyTorch，并让所有标量参数参与反向传播。
+以下是自动微分的版本，只是把定价核从 NumPy 换到了 PyTorch。
 
 ```python
 import torch
 
 
-def BlackMC_Torch(
+def BlackAdjointDifferenceMC(
     S0: float,
     r: float,
     y: float,
@@ -811,6 +809,6 @@ def BlackMC_Torch(
         "dy": float(y_t.grad.item()),       # Div Rho
         "dSigma": float(sigma_t.grad.item()),  # Vega
         "dK": float(K_t.grad.item()),       # Dual Delta (Strike Delta)
-        "dT": float(T_t.grad.item()),       # Theta（数学意义上的 ∂Price/∂T）
+        "dT": float(T_t.grad.item()),       # -Theta
     }
 ```
